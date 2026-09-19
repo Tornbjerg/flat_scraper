@@ -2,8 +2,8 @@ name: flatwatch
 
 on:
   schedule:
-    - cron: '*/10 * * * *'   # poll
-    - cron: '0 16 * * *'     # digest. UTC, so 18:00 in summer / 17:00 in winter.
+    - cron: '3,13,23,33,43,53 * * * *'   # poll, off the hour: :00 is GitHub's worst load spike
+    - cron: '7 16 * * *'                 # digest. UTC, so 18:07 summer / 17:07 winter.
   workflow_dispatch:
 
 permissions:
@@ -22,7 +22,7 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -r requirements.txt
-      - run: python flats.py ${{ github.event.schedule == '0 16 * * *' && '--digest' || '' }}
+      - run: python flats.py ${{ github.event.schedule == '7 16 * * *' && '--digest' || '' }}
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
       - name: Persist state
