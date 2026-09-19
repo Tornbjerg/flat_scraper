@@ -105,17 +105,22 @@ def digest():
         os.remove(QUEUE)
 
 
-# ponytail: GitHub drops most scheduled slots, so the digest cannot rely on its own
-# cron entry. Any poll run after the cutoff sends it, once per day. Date stamp is the lock.
-def due_for_digest():
-    today = datetime.datetime.now(datetime.timezone.utc)
-    if today.hour < DIGEST_AFTER_UTC:
-        return False
-    stamp = open(STAMP).read().strip() if os.path.exists(STAMP) else ""
-    if stamp == today.strftime("%F"):
-        return False
-    open(STAMP, "w").write(today.strftime("%F"))
-    return True
+# ponytail: GitHub drops most scheduled slots, so the digest cannot rely on its own cron
+# entry, nor on "is it today?" — a gap over midnight would skip a day silently. Rule is
+# elapsed time: normally the first run after the evening cutoff, but if the scheduler was
+# dead all evening, the next run to land at any hour catches up.
+def due_for_digest(now=None):
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    try:
+        last = datetime.datetime.fromisoformat(open(STAMP).read().strip())
+        last = last if last.tzinfo else last.replace(tzinfo=datetime.timezone.utc)
+    except (OSError, ValueError):
+        last = now - datetime.timedelta(days=99)   # never sent
+    hours = (now - last).total_seconds() / 3600
+    if hours >= 20 and (now.hour >= DIGEST_AFTER_UTC or hours >= 28):
+        open(STAMP, "w").write(now.isoformat())
+        return True
+    return False
 
 
 # what a change looks like from outside: price, size or room count moved
@@ -151,6 +156,18 @@ def main():
 
 
 def check():
+    tz = datetime.timezone.utc
+    evening = datetime.datetime(2026, 9, 19, 21, 30, tzinfo=tz)   # after the cutoff
+    morning = datetime.datetime(2026, 9, 19, 9, 30, tzinfo=tz)    # before it
+    small_hours = datetime.datetime(2026, 9, 20, 3, 30, tzinfo=tz)  # scheduler was dead all evening
+    st = lambda when, ago: open(STAMP, "w").write((when - datetime.timedelta(hours=ago)).isoformat())
+    st(evening, 2);      assert not due_for_digest(evening), "2h since last, too soon"
+    st(evening, 22);     assert due_for_digest(evening), "evening + 22h elapsed -> send"
+    assert not due_for_digest(evening), "the stamp it just wrote must block a second send"
+    st(morning, 22);     assert not due_for_digest(morning), "22h but before cutoff -> wait"
+    st(small_hours, 30); assert due_for_digest(small_hours), "30h -> catch up at any hour"
+    os.remove(STAMP)
+    print("digest timing: ok")
     assert matches({"sqm": 50, "zip": 2200}) and matches({"sqm": 80, "zip": 2000})
     assert not matches({"sqm": 90, "zip": 2300}) and not matches({"sqm": 90, "zip": 2500})
     assert not matches({"sqm": 49, "zip": 2200}) and not matches({"sqm": 90, "zip": 2800})
