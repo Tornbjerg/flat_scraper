@@ -1,0 +1,36 @@
+name: flatwatch
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # poll
+    - cron: '0 16 * * *'     # digest. UTC, so 18:00 in summer / 17:00 in winter.
+  workflow_dispatch:
+
+permissions:
+  contents: write            # to commit seen.json / pending.json back
+
+concurrency:
+  group: flatwatch           # never let a poll and the digest race on the state commit
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python flats.py ${{ github.event.schedule == '0 16 * * *' && '--digest' || '' }}
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      - name: Persist state
+        run: |
+          git config user.name flatwatch
+          git config user.email noreply@github.com
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "state $(date -u +%FT%TZ)"
+          git pull --rebase --autostash
+          git push
