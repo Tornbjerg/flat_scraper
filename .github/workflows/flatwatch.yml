@@ -34,3 +34,5 @@ jobs:
           git commit -m "state $(date -u +%FT%TZ)"
           git pull --rebase --autostash
           git push
+
+# registered via nudge
