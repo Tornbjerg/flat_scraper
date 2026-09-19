@@ -5,6 +5,12 @@ on:
     - cron: '3,13,23,33,43,53 * * * *'   # poll, off the hour: :00 is GitHub's worst load spike
     - cron: '7 16 * * *'                 # digest. UTC, so 18:07 summer / 17:07 winter.
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'poll (default) or digest'
+        type: choice
+        options: [poll, digest]
+        default: poll
 
 permissions:
   contents: write            # to commit seen.json / pending.json back
@@ -22,7 +28,7 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -r requirements.txt
-      - run: python flats.py ${{ github.event.schedule == '7 16 * * *' && '--digest' || '' }}
+      - run: python flats.py ${{ (github.event.schedule == '7 16 * * *' || inputs.mode == 'digest') && '--digest' || '' }}
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
       - name: Persist state

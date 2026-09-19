@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Poll Copenhagen rental sites, ntfy me when a new matching flat appears."""
-import json, os, sys
+import datetime, json, os, sys
 import requests
 from bs4 import BeautifulSoup
 
@@ -13,7 +13,9 @@ RENT_ALERT = 14000  # under this: notify at once. at or above: end-of-day digest
 
 NTFY = os.environ.get("NTFY_TOPIC", "")  # set in the environment; never commit the topic
 HERE = os.path.dirname(os.path.abspath(__file__))
+DIGEST_AFTER_UTC = 16  # 18:00 CEST / 17:00 CET
 STATE = os.path.join(HERE, "seen.json")      # id -> fingerprint, to spot changes
+STAMP = os.path.join(HERE, "last_digest.txt")
 QUEUE = os.path.join(HERE, "pending.json")   # id -> listing, waiting for the digest
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) flat-watch"}
 
@@ -83,15 +85,37 @@ def notify(f, updated):
 
 
 def digest():
+    """Always fires, even on an empty queue — silence must not be ambiguous."""
     q = json.load(open(QUEUE)) if os.path.exists(QUEUE) else {}
-    if not q:
-        return
     fs = sorted(q.values(), key=lambda f: -f["sqm"])
-    body = "\n\n".join(f"{line(f)}\n{f['url']}" for f in fs)
-    post(data=f"These listings are new since yesterday:\n\n{body}".encode(),
-         headers={"Title": f"{len(fs)} nye boliger over {kr(RENT_ALERT)} kr",
-                  "Click": fs[0]["url"], "Tags": "house"})
-    os.remove(QUEUE)
+    if fs:
+        title = f"{len(fs)} nye boliger over {kr(RENT_ALERT)} kr"
+        body = "These listings are new:\n\n" + "\n\n".join(
+            f"{line(f)}\n{f['url']}" for f in fs)
+        click = fs[0]["url"]
+    else:
+        title = "Ingen nye boliger i dag"
+        body = (f"No new listings over {kr(RENT_ALERT)} kr today.\n"
+                f"Watcher ran fine — {len(json.load(open(STATE))) if os.path.exists(STATE) else 0}"
+                " listings tracked across Kereby + CEJ.")
+        click = "https://udlejning.cej.dk/find-bolig/overblik"
+    post(data=body.encode(),
+         headers={"Title": title, "Click": click, "Tags": "house"})
+    if os.path.exists(QUEUE):
+        os.remove(QUEUE)
+
+
+# ponytail: GitHub drops most scheduled slots, so the digest cannot rely on its own
+# cron entry. Any poll run after the cutoff sends it, once per day. Date stamp is the lock.
+def due_for_digest():
+    today = datetime.datetime.now(datetime.timezone.utc)
+    if today.hour < DIGEST_AFTER_UTC:
+        return False
+    stamp = open(STAMP).read().strip() if os.path.exists(STAMP) else ""
+    if stamp == today.strftime("%F"):
+        return False
+    open(STAMP, "w").write(today.strftime("%F"))
+    return True
 
 
 # what a change looks like from outside: price, size or room count moved
@@ -122,6 +146,8 @@ def main():
             queued[f["id"]] = f  # ponytail: digest only fires from cron, not on its own
     json.dump(queued, open(QUEUE, "w"))
     json.dump(cur, open(STATE, "w"))
+    if not first_run and due_for_digest():
+        digest()
 
 
 def check():
