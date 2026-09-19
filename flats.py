@@ -13,7 +13,7 @@ RENT_ALERT = 14000  # under this: notify at once. at or above: end-of-day digest
 
 NTFY = os.environ.get("NTFY_TOPIC", "")  # set in the environment; never commit the topic
 HERE = os.path.dirname(os.path.abspath(__file__))
-DIGEST_AFTER_UTC = 16  # 18:00 CEST / 17:00 CET
+DIGEST_AFTER_UTC = 21  # 23:00 CEST / 22:00 CET
 STATE = os.path.join(HERE, "seen.json")      # id -> fingerprint, to spot changes
 STAMP = os.path.join(HERE, "last_digest.txt")
 QUEUE = os.path.join(HERE, "pending.json")   # id -> listing, waiting for the digest
