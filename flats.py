@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Poll Copenhagen rental sites, ntfy me when a new matching flat appears."""
-import datetime, json, os, sys
+import datetime, json, os, sys, zoneinfo
 import requests
 from bs4 import BeautifulSoup
 
@@ -13,7 +13,9 @@ RENT_ALERT = 14000  # under this: notify at once. at or above: end-of-day digest
 
 NTFY = os.environ.get("NTFY_TOPIC", "")  # set in the environment; never commit the topic
 HERE = os.path.dirname(os.path.abspath(__file__))
-DIGEST_AFTER_UTC = 21  # 23:00 CEST / 22:00 CET
+TZ = zoneinfo.ZoneInfo("Europe/Copenhagen")   # all wall-clock rules below are local, DST and all
+DIGEST_AFTER = 20      # send the daily summary from 20:00, before the snooze starts
+SNOOZE = (21, 5)       # no scraping 21:00-05:00: the sites do not publish overnight
 STATE, STAMP, QUEUE = "seen.json", "last_digest.txt", "pending.json"
 # Blob when FLAT_BLOB_CONN is set (Azure), plain files otherwise (local, tests).
 BLOB_CONN = os.environ.get("FLAT_BLOB_CONN", "")
@@ -149,6 +151,12 @@ def digest():
 # entry, nor on "is it today?" — a gap over midnight would skip a day silently. Rule is
 # elapsed time: normally the first run after the evening cutoff, but if the scheduler was
 # dead all evening, the next run to land at any hour catches up.
+def snoozing(now=None):
+    h = (now or datetime.datetime.now(TZ)).astimezone(TZ).hour
+    start, end = SNOOZE
+    return h >= start or h < end
+
+
 def due_for_digest(now=None):
     now = now or datetime.datetime.now(datetime.timezone.utc)
     try:
@@ -157,7 +165,7 @@ def due_for_digest(now=None):
     except (OSError, ValueError, AttributeError):
         last = now - datetime.timedelta(days=99)   # never sent
     hours = (now - last).total_seconds() / 3600
-    if hours >= 20 and (now.hour >= DIGEST_AFTER_UTC or hours >= 28):
+    if hours >= 20 and (now.astimezone(TZ).hour >= DIGEST_AFTER or hours >= 28):
         write_state(STAMP, now.isoformat())
         return True
     return False
@@ -168,6 +176,9 @@ def fingerprint(f): return f"{f['rent']}|{f['sqm']}|{f['rooms']}"
 
 
 def main():
+    if snoozing():
+        print("snoozing - no scrape")
+        return
     raw = read_state(STATE)
     prev = json.loads(raw) if raw else None
     first_run = prev is None
@@ -209,7 +220,10 @@ def check():
     st(morning, 22);     assert not due_for_digest(morning), "22h but before cutoff -> wait"
     st(small_hours, 30); assert due_for_digest(small_hours), "30h -> catch up at any hour"
     delete_state(STAMP)
-    print("digest timing: ok")
+    awake = datetime.datetime(2026, 9, 21, 20, 59, tzinfo=TZ)
+    assert not snoozing(awake) and snoozing(awake + datetime.timedelta(minutes=1)), "snooze starts 21:00"
+    assert snoozing(awake.replace(hour=4)) and not snoozing(awake.replace(hour=5)), "snooze ends 05:00"
+    print("digest timing + snooze: ok")
     assert matches({"sqm": 50, "zip": 2200}) and matches({"sqm": 80, "zip": 2000})
     assert not matches({"sqm": 90, "zip": 2300}) and not matches({"sqm": 90, "zip": 2500})
     assert not matches({"sqm": 49, "zip": 2200}) and not matches({"sqm": 90, "zip": 2800})
