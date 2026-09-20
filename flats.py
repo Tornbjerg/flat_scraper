@@ -14,9 +14,46 @@ RENT_ALERT = 14000  # under this: notify at once. at or above: end-of-day digest
 NTFY = os.environ.get("NTFY_TOPIC", "")  # set in the environment; never commit the topic
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIGEST_AFTER_UTC = 21  # 23:00 CEST / 22:00 CET
-STATE = os.path.join(HERE, "seen.json")      # id -> fingerprint, to spot changes
-STAMP = os.path.join(HERE, "last_digest.txt")
-QUEUE = os.path.join(HERE, "pending.json")   # id -> listing, waiting for the digest
+STATE, STAMP, QUEUE = "seen.json", "last_digest.txt", "pending.json"
+# Blob when FLAT_BLOB_CONN is set (Azure), plain files otherwise (local, tests).
+BLOB_CONN = os.environ.get("FLAT_BLOB_CONN", "")
+CONTAINER = "state"
+
+
+def _blob(name):
+    from azure.storage.blob import BlobClient  # lazy: local runs never need the SDK
+    return BlobClient.from_connection_string(BLOB_CONN, CONTAINER, name)
+
+
+def read_state(name):
+    if BLOB_CONN:
+        from azure.core.exceptions import ResourceNotFoundError
+        try:
+            return _blob(name).download_blob().readall().decode()
+        except ResourceNotFoundError:
+            return None
+    p = os.path.join(HERE, name)
+    return open(p).read() if os.path.exists(p) else None
+
+
+def write_state(name, text):
+    if BLOB_CONN:
+        _blob(name).upload_blob(text.encode(), overwrite=True)
+    else:
+        open(os.path.join(HERE, name), "w").write(text)
+
+
+def delete_state(name):
+    if BLOB_CONN:
+        from azure.core.exceptions import ResourceNotFoundError
+        try:
+            _blob(name).delete_blob()
+        except ResourceNotFoundError:
+            pass
+    else:
+        p = os.path.join(HERE, name)
+        if os.path.exists(p):
+            os.remove(p)
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) flat-watch"}
 
 
@@ -86,7 +123,8 @@ def notify(f, updated):
 
 def digest():
     """Always fires, even on an empty queue — silence must not be ambiguous."""
-    q = json.load(open(QUEUE)) if os.path.exists(QUEUE) else {}
+    raw = read_state(QUEUE)
+    q = json.loads(raw) if raw else {}
     fs = sorted(q.values(), key=lambda f: -f["sqm"])
     if fs:
         title = f"{len(fs)} nye boliger over {kr(RENT_ALERT)} kr"
@@ -96,13 +134,12 @@ def digest():
     else:
         title = "Ingen nye boliger i dag"
         body = (f"No new listings over {kr(RENT_ALERT)} kr today.\n"
-                f"Watcher ran fine — {len(json.load(open(STATE))) if os.path.exists(STATE) else 0}"
+                f"Watcher ran fine — {len(json.loads(read_state(STATE) or '{}'))}"
                 " listings tracked across Kereby + CEJ.")
         click = "https://udlejning.cej.dk/find-bolig/overblik"
     post(data=body.encode(),
          headers={"Title": title, "Click": click, "Tags": "house"})
-    if os.path.exists(QUEUE):
-        os.remove(QUEUE)
+    delete_state(QUEUE)
 
 
 # ponytail: GitHub drops most scheduled slots, so the digest cannot rely on its own cron
@@ -112,13 +149,13 @@ def digest():
 def due_for_digest(now=None):
     now = now or datetime.datetime.now(datetime.timezone.utc)
     try:
-        last = datetime.datetime.fromisoformat(open(STAMP).read().strip())
+        last = datetime.datetime.fromisoformat(read_state(STAMP).strip())
         last = last if last.tzinfo else last.replace(tzinfo=datetime.timezone.utc)
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         last = now - datetime.timedelta(days=99)   # never sent
     hours = (now - last).total_seconds() / 3600
     if hours >= 20 and (now.hour >= DIGEST_AFTER_UTC or hours >= 28):
-        open(STAMP, "w").write(now.isoformat())
+        write_state(STAMP, now.isoformat())
         return True
     return False
 
@@ -128,7 +165,8 @@ def fingerprint(f): return f"{f['rent']}|{f['sqm']}|{f['rooms']}"
 
 
 def main():
-    prev = json.load(open(STATE)) if os.path.exists(STATE) else None
+    raw = read_state(STATE)
+    prev = json.loads(raw) if raw else None
     first_run = prev is None
     prev = prev or {}
     found = []
@@ -139,7 +177,8 @@ def main():
             print(f"{src.__name__} failed: {e}", file=sys.stderr)
     cur = {f["id"]: fingerprint(f) for f in found}
     changed = [f for f in found if matches(f) and prev.get(f["id"]) != cur[f["id"]]]
-    queued = json.load(open(QUEUE)) if os.path.exists(QUEUE) else {}
+    qraw = read_state(QUEUE)
+    queued = json.loads(qraw) if qraw else {}
     for f in changed:
         was = "seeding" if first_run else "UPDATED" if f["id"] in prev else "NEW"
         print(f"{was} {f['sqm']}m² {kr(f['rent'])}kr {f['addr']} {f['url']}")
@@ -149,8 +188,8 @@ def main():
             notify(f, updated=f["id"] in prev)
         else:
             queued[f["id"]] = f  # ponytail: digest only fires from cron, not on its own
-    json.dump(queued, open(QUEUE, "w"))
-    json.dump(cur, open(STATE, "w"))
+    write_state(QUEUE, json.dumps(queued))
+    write_state(STATE, json.dumps(cur, sort_keys=True))
     if not first_run and due_for_digest():
         digest()
 
@@ -160,13 +199,13 @@ def check():
     evening = datetime.datetime(2026, 9, 19, 21, 30, tzinfo=tz)   # after the cutoff
     morning = datetime.datetime(2026, 9, 19, 9, 30, tzinfo=tz)    # before it
     small_hours = datetime.datetime(2026, 9, 20, 3, 30, tzinfo=tz)  # scheduler was dead all evening
-    st = lambda when, ago: open(STAMP, "w").write((when - datetime.timedelta(hours=ago)).isoformat())
+    st = lambda when, ago: write_state(STAMP, (when - datetime.timedelta(hours=ago)).isoformat())
     st(evening, 2);      assert not due_for_digest(evening), "2h since last, too soon"
     st(evening, 22);     assert due_for_digest(evening), "evening + 22h elapsed -> send"
     assert not due_for_digest(evening), "the stamp it just wrote must block a second send"
     st(morning, 22);     assert not due_for_digest(morning), "22h but before cutoff -> wait"
     st(small_hours, 30); assert due_for_digest(small_hours), "30h -> catch up at any hour"
-    os.remove(STAMP)
+    delete_state(STAMP)
     print("digest timing: ok")
     assert matches({"sqm": 50, "zip": 2200}) and matches({"sqm": 80, "zip": 2000})
     assert not matches({"sqm": 90, "zip": 2300}) and not matches({"sqm": 90, "zip": 2500})
