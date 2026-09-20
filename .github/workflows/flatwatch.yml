@@ -2,8 +2,9 @@ name: flatwatch
 
 on:
   schedule:
-    - cron: '3,13,23,33,43,53 * * * *'   # poll, off the hour: :00 is GitHub's worst load spike
-    - cron: '7 21 * * *'                 # digest. UTC, so 23:07 summer / 22:07 winter.
+    # Only one schedule: the poll. It sends the daily digest itself once past the
+    # cutoff (see due_for_digest), so a separate digest cron would double-send.
+    - cron: '3,13,23,33,43,53 * * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -28,7 +29,7 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -r requirements.txt
-      - run: python flats.py ${{ (github.event.schedule == '7 21 * * *' || inputs.mode == 'digest') && '--digest' || '' }}
+      - run: python flats.py ${{ inputs.mode == 'digest' && '--digest' || '' }}
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
       - name: Persist state
