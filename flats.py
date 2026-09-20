@@ -126,16 +126,19 @@ def digest():
     raw = read_state(QUEUE)
     q = json.loads(raw) if raw else {}
     fs = sorted(q.values(), key=lambda f: -f["sqm"])
+    tracked = len(json.loads(read_state(STATE) or "{}"))
     if fs:
         title = f"{len(fs)} nye boliger over {kr(RENT_ALERT)} kr"
-        body = "These listings are new:\n\n" + "\n\n".join(
-            f"{line(f)}\n{f['url']}" for f in fs)
+        body = (f"New listings over {kr(RENT_ALERT)} kr/md."
+                f" (Under that, you get pinged the moment they appear.)\n\n"
+                + "\n\n".join(f"{line(f)}\n{f['url']}" for f in fs))
         click = fs[0]["url"]
     else:
         title = "Ingen nye boliger i dag"
-        body = (f"No new listings over {kr(RENT_ALERT)} kr today.\n"
-                f"Watcher ran fine — {len(json.loads(read_state(STATE) or '{}'))}"
-                " listings tracked across Kereby + CEJ.")
+        body = (f"Nothing new today.\n\n"
+                f"Under {kr(RENT_ALERT)} kr/md — sent the moment they appear, none did.\n"
+                f"Over {kr(RENT_ALERT)} kr/md — collected for this summary, none did.\n\n"
+                f"Tracking {tracked} listings on Kereby + CEJ.")
         click = "https://udlejning.cej.dk/find-bolig/overblik"
     post(data=body.encode(),
          headers={"Title": title, "Click": click, "Tags": "house"})
