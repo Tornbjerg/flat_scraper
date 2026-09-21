@@ -16,7 +16,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TZ = zoneinfo.ZoneInfo("Europe/Copenhagen")   # all wall-clock rules below are local, DST and all
 DIGEST_AFTER = 20      # send the daily summary from 20:00, before the snooze starts
 SNOOZE = (21, 5)       # no scraping 21:00-05:00: the sites do not publish overnight
+HEARTBEAT_AT = 7       # "still alive" ping each morning
 STATE, STAMP, QUEUE = "seen.json", "last_digest.txt", "pending.json"
+BEAT = "last_heartbeat.txt"
 # Blob when FLAT_BLOB_CONN is set (Azure), plain files otherwise (local, tests).
 BLOB_CONN = os.environ.get("FLAT_BLOB_CONN", "")
 CONTAINER = "state"
@@ -157,18 +159,27 @@ def snoozing(now=None):
     return h >= start or h < end
 
 
-def due_for_digest(now=None):
+def due_once_daily(stamp, after_hour, now=None):
+    """True at most once per day, from after_hour local. Catches up if a day was missed."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
     try:
-        last = datetime.datetime.fromisoformat(read_state(STAMP).strip())
+        last = datetime.datetime.fromisoformat(read_state(stamp).strip())
         last = last if last.tzinfo else last.replace(tzinfo=datetime.timezone.utc)
     except (OSError, ValueError, AttributeError):
-        last = now - datetime.timedelta(days=99)   # never sent
+        last = now - datetime.timedelta(days=99)
     hours = (now - last).total_seconds() / 3600
-    if hours >= 20 and (now.astimezone(TZ).hour >= DIGEST_AFTER or hours >= 28):
-        write_state(STAMP, now.isoformat())
+    if hours >= 20 and (now.astimezone(TZ).hour >= after_hour or hours >= 28):
+        write_state(stamp, now.isoformat())
         return True
     return False
+
+
+def heartbeat(tracked):
+    post(data=(f"Live. Watching {len(SOURCES)} sites "
+               f"({', '.join(f.__name__.upper() for f in SOURCES)}), {tracked} listings on file.\n"
+               f"Under {kr(RENT_ALERT)} kr -> instant alert. Over -> {DIGEST_AFTER}:00 summary.").encode(),
+         headers={"Title": "Flatwatch kører", "Tags": "white_check_mark",
+                  "Click": "https://kereby.dk/bolig/", "Priority": "low"})
 
 
 # what a change looks like from outside: price, size or room count moved
@@ -204,7 +215,9 @@ def main():
             queued[f["id"]] = f  # ponytail: digest only fires from cron, not on its own
     write_state(QUEUE, json.dumps(queued))
     write_state(STATE, json.dumps(cur, sort_keys=True))
-    if not first_run and due_for_digest():
+    if not first_run and due_once_daily(BEAT, HEARTBEAT_AT):
+        heartbeat(len(cur))
+    if not first_run and due_once_daily(STAMP, DIGEST_AFTER):
         digest()
 
 
@@ -214,16 +227,23 @@ def check():
     morning = datetime.datetime(2026, 9, 19, 9, 30, tzinfo=tz)    # before it
     small_hours = datetime.datetime(2026, 9, 20, 3, 30, tzinfo=tz)  # scheduler was dead all evening
     st = lambda when, ago: write_state(STAMP, (when - datetime.timedelta(hours=ago)).isoformat())
-    st(evening, 2);      assert not due_for_digest(evening), "2h since last, too soon"
-    st(evening, 22);     assert due_for_digest(evening), "evening + 22h elapsed -> send"
-    assert not due_for_digest(evening), "the stamp it just wrote must block a second send"
-    st(morning, 22);     assert not due_for_digest(morning), "22h but before cutoff -> wait"
-    st(small_hours, 30); assert due_for_digest(small_hours), "30h -> catch up at any hour"
+    st(evening, 2);      assert not due_once_daily(STAMP, DIGEST_AFTER, evening), "2h since last, too soon"
+    st(evening, 22);     assert due_once_daily(STAMP, DIGEST_AFTER, evening), "evening + 22h elapsed -> send"
+    assert not due_once_daily(STAMP, DIGEST_AFTER, evening), "the stamp it just wrote must block a second send"
+    st(morning, 22);     assert not due_once_daily(STAMP, DIGEST_AFTER, morning), "22h but before cutoff -> wait"
+    st(small_hours, 30); assert due_once_daily(STAMP, DIGEST_AFTER, small_hours), "30h -> catch up at any hour"
     delete_state(STAMP)
+    # the morning ping uses the same rule with a different hour and its own stamp
+    seven = datetime.datetime(2026, 9, 21, 7, 5, tzinfo=TZ)
+    st2 = lambda ago: write_state(BEAT, (seven - datetime.timedelta(hours=ago)).isoformat())
+    st2(22); assert due_once_daily(BEAT, HEARTBEAT_AT, seven), "07:05 + 22h -> ping"
+    assert not due_once_daily(BEAT, HEARTBEAT_AT, seven), "its own stamp blocks a repeat"
+    st2(22); assert not due_once_daily(BEAT, HEARTBEAT_AT, seven.replace(hour=6)), "06:00 is too early"
+    delete_state(BEAT)
     awake = datetime.datetime(2026, 9, 21, 20, 59, tzinfo=TZ)
     assert not snoozing(awake) and snoozing(awake + datetime.timedelta(minutes=1)), "snooze starts 21:00"
     assert snoozing(awake.replace(hour=4)) and not snoozing(awake.replace(hour=5)), "snooze ends 05:00"
-    print("digest timing + snooze: ok")
+    print("digest + heartbeat timing + snooze: ok")
     assert matches({"sqm": 50, "zip": 2200}) and matches({"sqm": 80, "zip": 2000})
     assert not matches({"sqm": 90, "zip": 2300}) and not matches({"sqm": 90, "zip": 2500})
     assert not matches({"sqm": 49, "zip": 2200}) and not matches({"sqm": 90, "zip": 2800})
